@@ -304,7 +304,7 @@ cloud_api_types = { path = "crates/cloud_api_types" }
 cloud_llm_client = { path = "crates/cloud_llm_client" }
 collab = { path = "crates/collab" }
 collab_ui = { path = "crates/collab_ui" }
-collections = { path = "crates/collections", version = "0.1.0" }
+collections = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6", version = "0.1.0" }
 command_palette = { path = "crates/command_palette" }
 command_palette_hooks = { path = "crates/command_palette_hooks" }
 compliance = { path = "tooling/compliance" }
@@ -353,7 +353,7 @@ git_ui_core = { path = "crates/git_ui_core" }
 go_to_line = { path = "crates/go_to_line" }
 google_ai = { path = "crates/google_ai" }
 grammars = { path = "crates/grammars" }
-gpui = { path = "crates/gpui", default-features = false }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6", default-features = false }
 gpui_apple = { path = "crates/gpui_apple" }
 gpui_shared_string = { path = "crates/gpui_shared_string" }
 gpui_linux = { path = "crates/gpui_linux", default-features = false }
@@ -361,12 +361,12 @@ gpui_macos = { path = "crates/gpui_macos", default-features = false }
 gpui_macros = { path = "crates/gpui_macros" }
 gpui_platform = { path = "crates/gpui_platform", default-features = false }
 gpui_web = { path = "crates/gpui_web" }
-gpui_wgpu = { path = "crates/gpui_wgpu" }
+gpui_wgpu = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
 gpui_windows = { path = "crates/gpui_windows", default-features = false }
 gpui_tokio = { path = "crates/gpui_tokio" }
-gpui_util = { path = "crates/gpui_util" }
+gpui_util = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
 html_to_markdown = { path = "crates/html_to_markdown" }
-http_client = { path = "crates/http_client" }
+http_client = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
 http_client_tls = { path = "crates/http_client_tls" }
 http_proxy = { path = "crates/http_proxy" }
 icons = { path = "crates/icons" }

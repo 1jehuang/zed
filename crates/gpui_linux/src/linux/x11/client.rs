@@ -1377,18 +1377,25 @@ impl X11Client {
                     px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
                     px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
                 );
-                // scale is in FP16.16 format: divide by 65536 to get the float value
-                let new_absolute_scale = event.scale as f32 / 65536.0;
-                let previous_scale = state.pinch_scale;
-                let zoom_delta = new_absolute_scale - previous_scale;
-                state.pinch_scale = new_absolute_scale;
-                drop(state);
-                window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
+                // XI2 reports signed FP16.16 motion in device coordinates.
+                // Convert to logical pixels without the wheel path's line units
+                // or Shift-axis remapping. Scale is absolute since gesture begin.
+                let translation = point(
+                    px(event.delta_x as f32 / 65536.0 / state.scale_factor),
+                    px(event.delta_y as f32 / 65536.0 / state.scale_factor),
+                );
+                let (pinch, scroll) = crate::linux::pinch::pinch_update(
+                    &mut state.pinch_scale,
+                    event.scale as f32 / 65536.0,
                     position,
-                    delta: zoom_delta,
+                    translation,
                     modifiers,
-                    phase: gpui::TouchPhase::Moved,
-                }));
+                );
+                drop(state);
+                window.handle_input(pinch);
+                if let Some(scroll) = scroll {
+                    window.handle_input(scroll);
+                }
             }
             Event::XinputGesturePinchEnd(event) => {
                 let window = self.get_window(event.event)?;
@@ -1405,7 +1412,14 @@ impl X11Client {
                     position,
                     delta: 0.0,
                     modifiers,
-                    phase: gpui::TouchPhase::Ended,
+                    phase: if event
+                        .flags
+                        .contains(xinput::GesturePinchEventFlags::GESTURE_PINCH_CANCELLED)
+                    {
+                        gpui::TouchPhase::Cancelled
+                    } else {
+                        gpui::TouchPhase::Ended
+                    },
                 }));
             }
             _ => {}

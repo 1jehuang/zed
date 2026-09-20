@@ -1,6 +1,8 @@
 mod dispatcher;
 mod headless;
 mod keyboard;
+#[cfg(any(feature = "wayland", feature = "x11"))]
+mod pinch;
 mod platform;
 mod system_notifications;
 #[cfg(any(feature = "wayland", feature = "x11"))]
