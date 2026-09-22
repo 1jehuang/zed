@@ -355,12 +355,12 @@ google_ai = { path = "crates/google_ai" }
 grammars = { path = "crates/grammars" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6", default-features = false }
 gpui_apple = { path = "crates/gpui_apple" }
-gpui_shared_string = { path = "crates/gpui_shared_string" }
+gpui_shared_string = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
 gpui_linux = { path = "crates/gpui_linux", default-features = false }
 gpui_macos = { path = "crates/gpui_macos", default-features = false }
-gpui_macros = { path = "crates/gpui_macros" }
-gpui_platform = { path = "crates/gpui_platform", default-features = false }
-gpui_web = { path = "crates/gpui_web" }
+gpui_macros = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
+gpui_platform = { default-features = false, git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
+gpui_web = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
 gpui_wgpu = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
 gpui_windows = { path = "crates/gpui_windows", default-features = false }
 gpui_tokio = { path = "crates/gpui_tokio" }
@@ -402,7 +402,7 @@ markdown = { path = "crates/markdown" }
 markdown_preview = { path = "crates/markdown_preview" }
 mermaid_render = { path = "crates/mermaid_render" }
 svg_preview = { path = "crates/svg_preview" }
-media = { path = "crates/media" }
+media = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
 menu = { path = "crates/menu" }
 mime = "0.3.17"
 migrator = { path = "crates/migrator" }
@@ -437,17 +437,17 @@ prompt_store = { path = "crates/prompt_store" }
 proto = { path = "crates/proto" }
 proxy_handshake = { path = "crates/proxy_handshake" }
 recent_projects = { path = "crates/recent_projects" }
-refineable = { path = "crates/refineable" }
+refineable = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
 release_channel = { path = "crates/release_channel" }
 remote = { path = "crates/remote" }
 remote_connection = { path = "crates/remote_connection" }
 remote_server = { path = "crates/remote_server" }
 repl = { path = "crates/repl" }
-reqwest_client = { path = "crates/reqwest_client" }
+reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
 rodio = { git = "https://github.com/RustAudio/rodio", rev = "e50e726ddd0292f6ef9de0dda6b90af4ed1fb66a", features = ["wav", "playback", "wav_output", "recording"] }
 rope = { path = "crates/rope" }
 rpc = { path = "crates/rpc" }
-scheduler = { path = "crates/scheduler" }
+scheduler = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
 sandbox = { path = "crates/sandbox" }
 search = { path = "crates/search" }
 session = { path = "crates/session" }
@@ -464,7 +464,7 @@ snippets_ui = { path = "crates/snippets_ui" }
 sqlez = { path = "crates/sqlez" }
 sqlez_macros = { path = "crates/sqlez_macros" }
 streaming_diff = { path = "crates/streaming_diff" }
-sum_tree = { path = "crates/sum_tree" }
+sum_tree = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
 codestral = { path = "crates/codestral" }
 system_specs = { path = "crates/system_specs" }
 syntax_theme = { path = "crates/syntax_theme" }
@@ -489,7 +489,7 @@ ui_input = { path = "crates/ui_input" }
 ui_macros = { path = "crates/ui_macros" }
 ui_prompt = { path = "crates/ui_prompt" }
 util = { path = "crates/util" }
-util_macros = { path = "crates/util_macros" }
+util_macros = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
 vim = { path = "crates/vim" }
 vim_mode_setting = { path = "crates/vim_mode_setting" }
 which_key = { path = "crates/which_key" }
@@ -509,7 +509,7 @@ edit_prediction_metrics = { path = "crates/edit_prediction_metrics" }
 zeta_prompt = { path = "crates/zeta_prompt" }
 zlog = { path = "crates/zlog" }
 zlog_settings = { path = "crates/zlog_settings" }
-ztracing = { path = "crates/ztracing" }
+ztracing = { git = "https://github.com/zed-industries/zed", rev = "bc538def4545534201bbfcac4e95ac34ea6501b6" }
 ztracing_macro = { path = "crates/ztracing_macro" }
 
 #

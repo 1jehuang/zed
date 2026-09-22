@@ -317,6 +317,75 @@ thread_local! {
     /// This allows multiple test Apps to have isolated arenas, preventing
     /// cross-session corruption when the scheduler interleaves their tasks.
     static CURRENT_ELEMENT_ARENA: Cell<Option<*const RefCell<Arena>>> = const { Cell::new(None) };
+
+    static INSTALLED_ELEMENT_ARENA_CONTEXT: Cell<Option<ElementArenaContext>> = const { Cell::new(None) };
+}
+
+/// The thread-local element arena shared by a host and its dynamically loaded GPUI copies.
+///
+/// This table contains callbacks, not an App or an arena pointer. Each callback resolves
+/// the calling thread's arena, so the table can also be installed on another thread.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ElementArenaContext {
+    read_current: unsafe extern "C-unwind" fn() -> *const std::ffi::c_void,
+    replace_current:
+        unsafe extern "C-unwind" fn(*const std::ffi::c_void) -> *const std::ffi::c_void,
+    fallback: unsafe extern "C-unwind" fn() -> *const std::ffi::c_void,
+}
+
+impl ElementArenaContext {
+    /// Returns the installed canonical table, or callbacks directly accessing this
+    /// GPUI copy's thread locals when no table has been installed on this thread.
+    pub fn current() -> Self {
+        INSTALLED_ELEMENT_ARENA_CONTEXT.with(|context| {
+            context.get().unwrap_or(Self {
+                read_current: local_current_element_arena,
+                replace_current: replace_local_current_element_arena,
+                fallback: local_fallback_element_arena,
+            })
+        })
+    }
+
+    /// Installs the canonical arena context in this GPUI copy on the calling thread.
+    /// Reinstalling the same context is harmless. Install it before any plugin renders
+    /// or constructs elements, and on every thread that uses the plugin's GPUI copy.
+    /// An idle plugin copy may initially join a context whose host draw is active.
+    ///
+    /// # Safety
+    ///
+    /// All participating copies must use the exact same GPUI source, Rust toolchain,
+    /// and build configuration affecting type layout, including `Arena`, `RefCell`,
+    /// and arena-allocated element types. This is not a stable ABI between versions.
+    /// The module containing the callbacks and its thread-local storage must stay
+    /// loaded while this context is installed or any scopes or allocations use it.
+    /// Modules containing allocated elements' code must also stay loaded until those
+    /// elements have been dropped. Do not rebind this copy's active draw scopes to a
+    /// different context, or change contexts while allocations from this copy's old
+    /// context remain in use. The callbacks must only be used on their calling thread,
+    /// never during or after teardown of that thread's GPUI thread-local storage.
+    pub unsafe fn install(self) {
+        INSTALLED_ELEMENT_ARENA_CONTEXT.with(|context| context.set(Some(self)));
+    }
+}
+
+unsafe extern "C-unwind" fn local_current_element_arena() -> *const std::ffi::c_void {
+    CURRENT_ELEMENT_ARENA
+        .with(|current| current.get().map_or(std::ptr::null(), |arena| arena.cast()))
+}
+
+unsafe extern "C-unwind" fn replace_local_current_element_arena(
+    arena: *const std::ffi::c_void,
+) -> *const std::ffi::c_void {
+    CURRENT_ELEMENT_ARENA.with(|current| {
+        current
+            .replace((!arena.is_null()).then_some(arena.cast()))
+            .map_or(std::ptr::null(), |previous| previous.cast())
+    })
+}
+
+unsafe extern "C-unwind" fn local_fallback_element_arena() -> *const std::ffi::c_void {
+    ELEMENT_ARENA.with(|arena| (arena as *const RefCell<Arena>).cast())
 }
 
 /// Whether a window draw is currently in progress on this thread.
@@ -330,22 +399,27 @@ thread_local! {
 /// message pumping in the Windows window procedure), instead of running a
 /// nested draw or panicking on the already-borrowed App.
 fn draw_in_progress() -> bool {
-    CURRENT_ELEMENT_ARENA.with(|current| current.get().is_some())
+    // SAFETY: The installed table's lifetime and layout are guaranteed by install.
+    unsafe { !(ElementArenaContext::current().read_current)().is_null() }
 }
 
 /// Allocates an element in the current arena. Uses the app-specific arena if one
 /// is active (during draw), otherwise falls back to the thread-local ELEMENT_ARENA.
 pub(crate) fn with_element_arena<R>(f: impl FnOnce(&mut Arena) -> R) -> R {
-    CURRENT_ELEMENT_ARENA.with(|current| {
-        if let Some(arena_ptr) = current.get() {
-            // SAFETY: The pointer is valid for the duration of the draw operation
-            // that set it, and we're being called during that same draw.
-            let arena_cell = unsafe { &*arena_ptr };
-            f(&mut arena_cell.borrow_mut())
+    let context = ElementArenaContext::current();
+    // SAFETY: install guarantees compatible callbacks and arena layout. The current
+    // pointer is live until its draw scope ends, and the fallback lives in this
+    // thread's TLS. Neither pointer escapes this synchronous borrow.
+    let arena_cell = unsafe {
+        let current = (context.read_current)();
+        let arena = if current.is_null() {
+            (context.fallback)()
         } else {
-            ELEMENT_ARENA.with_borrow_mut(f)
-        }
-    })
+            current
+        };
+        &*arena.cast::<RefCell<Arena>>()
+    };
+    f(&mut arena_cell.borrow_mut())
 }
 
 /// Scope guard that sets CURRENT_ELEMENT_ARENA for the duration of a draw
@@ -366,7 +440,8 @@ pub(crate) struct ElementArenaScope {
     /// The entered arena: compared against the argument in `exit`, and
     /// dereferenced in `Drop` to end its scope (see the SAFETY note there).
     entered: *const RefCell<Arena>,
-    previous: Option<*const RefCell<Arena>>,
+    previous: *const std::ffi::c_void,
+    context: ElementArenaContext,
     exited: bool,
 }
 
@@ -374,14 +449,15 @@ impl ElementArenaScope {
     /// Enter a scope where element allocations use the given arena.
     pub(crate) fn enter(arena: &RefCell<Arena>) -> Self {
         arena.borrow_mut().begin_scope();
-        let previous = CURRENT_ELEMENT_ARENA.with(|current| {
-            let prev = current.get();
-            current.set(Some(arena as *const RefCell<Arena>));
-            prev
-        });
+        let context = ElementArenaContext::current();
+        // SAFETY: The draw owns arena until this guard drops. install guarantees
+        // that the callback accesses compatible TLS on this thread.
+        let previous =
+            unsafe { (context.replace_current)((arena as *const RefCell<Arena>).cast()) };
         Self {
             entered: arena as *const RefCell<Arena>,
             previous,
+            context,
             exited: false,
         }
     }
@@ -416,9 +492,9 @@ impl Drop for ElementArenaScope {
         // keeps the arena's scope depth correct even when a draw panics; if this
         // only happened in `exit`, a panic between `enter` and `exit` would leave
         // the depth elevated and defer every future clear.
-        CURRENT_ELEMENT_ARENA.with(|current| {
-            current.set(self.previous);
-        });
+        // SAFETY: The enclosing scope keeps the previous arena alive. Restore via
+        // the exact table used to enter rather than resolving another GPUI copy.
+        unsafe { (self.context.replace_current)(self.previous) };
         // SAFETY: `entered` came from a `&RefCell<Arena>` in `enter`, and the
         // arena (owned by the `App` being drawn) outlives this guard on both the
         // normal and unwinding paths, since the guard is a local of the draw.
@@ -6761,6 +6837,309 @@ pub fn outline(
         border_widths: (1.).into(),
         border_color: border_color.into(),
         border_style,
+    }
+}
+
+#[cfg(test)]
+mod element_arena_context_tests {
+    use super::*;
+    use crate::TestAppContext;
+    use std::{panic::AssertUnwindSafe, rc::Rc};
+
+    thread_local! {
+        static FOREIGN_CURRENT: Cell<*const std::ffi::c_void> = const { Cell::new(std::ptr::null()) };
+        static FOREIGN_FALLBACK: RefCell<Arena> = RefCell::new(Arena::new(1024));
+    }
+
+    unsafe extern "C-unwind" fn foreign_current() -> *const std::ffi::c_void {
+        FOREIGN_CURRENT.with(Cell::get)
+    }
+
+    unsafe extern "C-unwind" fn foreign_replace(
+        arena: *const std::ffi::c_void,
+    ) -> *const std::ffi::c_void {
+        FOREIGN_CURRENT.with(|current| current.replace(arena))
+    }
+
+    unsafe extern "C-unwind" fn foreign_fallback() -> *const std::ffi::c_void {
+        FOREIGN_FALLBACK.with(|arena| (arena as *const RefCell<Arena>).cast())
+    }
+
+    fn foreign_context() -> ElementArenaContext {
+        ElementArenaContext {
+            read_current: foreign_current,
+            replace_current: foreign_replace,
+            fallback: foreign_fallback,
+        }
+    }
+
+    struct RestoreContext(Option<ElementArenaContext>);
+
+    impl RestoreContext {
+        fn install(context: ElementArenaContext) -> Self {
+            let previous = INSTALLED_ELEMENT_ARENA_CONTEXT.with(Cell::get);
+            // SAFETY: Tests use the same GPUI implementation and static callbacks,
+            // and restore the table only after all scopes and allocations end.
+            unsafe { context.install() };
+            Self(previous)
+        }
+    }
+
+    impl Drop for RestoreContext {
+        fn drop(&mut self) {
+            INSTALLED_ELEMENT_ARENA_CONTEXT.with(|context| context.set(self.0));
+        }
+    }
+
+    struct DropProbe(Rc<Cell<usize>>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    fn allocate_probe(drops: &Rc<Cell<usize>>) -> crate::arena::ArenaBox<DropProbe> {
+        with_element_arena(|arena| arena.alloc(|| DropProbe(drops.clone())))
+    }
+
+    fn exit_and_clear(scope: ElementArenaScope, arena: &RefCell<Arena>) {
+        let clear = scope.exit(arena);
+        assert!(std::ptr::eq(clear.arena, arena));
+        arena.borrow_mut().clear();
+    }
+
+    #[test]
+    fn test_element_arena_context_local_and_idempotent_install() {
+        let context = ElementArenaContext::current();
+        let _restore = RestoreContext::install(context);
+        let arena = RefCell::new(Arena::new(1024));
+        let scope = ElementArenaScope::enter(&arena);
+        let drops = Rc::new(Cell::new(0));
+        let allocation = allocate_probe(&drops);
+        for _ in 0..4 {
+            // SAFETY: Reinstalling the exact same canonical context is permitted.
+            unsafe { ElementArenaContext::current().install() };
+            assert!(draw_in_progress());
+            assert!(Rc::ptr_eq(&allocation.0, &drops));
+        }
+        exit_and_clear(scope, &arena);
+        assert!(!draw_in_progress());
+        assert_eq!(drops.get(), 1);
+    }
+
+    #[test]
+    fn test_element_arena_context_foreign_fallback_and_scope() {
+        let _restore = RestoreContext::install(foreign_context());
+        let fallback_drops = Rc::new(Cell::new(0));
+        let fallback_allocation = allocate_probe(&fallback_drops);
+        assert!(!draw_in_progress());
+        FOREIGN_FALLBACK.with(|arena| {
+            with_element_arena(|current| assert!(std::ptr::eq(current, arena.as_ptr())));
+        });
+        let arena = RefCell::new(Arena::new(1024));
+        let scope = ElementArenaScope::enter(&arena);
+        CURRENT_ELEMENT_ARENA.with(|current| assert!(current.get().is_none()));
+        // SAFETY: current must return the foreign table itself, not forwarding
+        // callbacks that would recurse after installing the returned table.
+        unsafe { ElementArenaContext::current().install() };
+        assert!(draw_in_progress());
+        let drops = Rc::new(Cell::new(0));
+        let allocation = allocate_probe(&drops);
+        assert!(Rc::ptr_eq(&allocation.0, &drops));
+        exit_and_clear(scope, &arena);
+        assert_eq!(drops.get(), 1);
+        assert_eq!(fallback_drops.get(), 0);
+        assert!(Rc::ptr_eq(&fallback_allocation.0, &fallback_drops));
+        FOREIGN_FALLBACK.with_borrow_mut(Arena::clear);
+        assert_eq!(fallback_drops.get(), 1);
+        assert!(!draw_in_progress());
+    }
+
+    #[test]
+    fn test_element_arena_context_plugin_joins_active_host_draw() {
+        let arena = RefCell::new(Arena::new(1024));
+        let drops = Rc::new(Cell::new(0));
+        // Simulate the host copy entering its draw before the plugin has installed
+        // anything. In particular, do not use the plugin's scope entry path here.
+        arena.borrow_mut().begin_scope();
+        let previous = FOREIGN_CURRENT
+            .with(|current| current.replace((&arena as *const RefCell<Arena>).cast()));
+        let host_scope = ElementArenaScope {
+            entered: &arena,
+            previous,
+            context: foreign_context(),
+            exited: false,
+        };
+        assert!(!draw_in_progress());
+        let _restore = RestoreContext::install(foreign_context());
+        assert!(draw_in_progress());
+        CURRENT_ELEMENT_ARENA.with(|current| assert!(current.get().is_none()));
+        let allocation = allocate_probe(&drops);
+        assert!(Rc::ptr_eq(&allocation.0, &drops));
+        with_element_arena(|current| assert!(std::ptr::eq(current, arena.as_ptr())));
+        exit_and_clear(host_scope, &arena);
+        assert_eq!(drops.get(), 1);
+        assert!(!draw_in_progress());
+    }
+
+    #[test]
+    fn test_element_arena_context_nested_same_arena_defers_cleanup() {
+        let _restore = RestoreContext::install(foreign_context());
+        let arena = RefCell::new(Arena::new(1024));
+        let drops = Rc::new(Cell::new(0));
+        let outer = ElementArenaScope::enter(&arena);
+        let outer_allocation = allocate_probe(&drops);
+        let inner = ElementArenaScope::enter(&arena);
+        let inner_allocation = allocate_probe(&drops);
+        exit_and_clear(inner, &arena);
+        assert!(draw_in_progress());
+        assert_eq!(drops.get(), 0);
+        assert!(Rc::ptr_eq(&outer_allocation.0, &inner_allocation.0));
+        exit_and_clear(outer, &arena);
+        assert_eq!(drops.get(), 2);
+        assert!(!draw_in_progress());
+    }
+
+    #[test]
+    fn test_element_arena_context_nested_different_arenas_restore_parent() {
+        let _restore = RestoreContext::install(foreign_context());
+        let first_arena = RefCell::new(Arena::new(1024));
+        let second_arena = RefCell::new(Arena::new(1024));
+        let first_drops = Rc::new(Cell::new(0));
+        let second_drops = Rc::new(Cell::new(0));
+        let outer = ElementArenaScope::enter(&first_arena);
+        let outer_allocation = allocate_probe(&first_drops);
+        let inner = ElementArenaScope::enter(&second_arena);
+        let inner_allocation = allocate_probe(&second_drops);
+        assert!(Rc::ptr_eq(&inner_allocation.0, &second_drops));
+        exit_and_clear(inner, &second_arena);
+        assert_eq!(second_drops.get(), 1);
+        assert_eq!(first_drops.get(), 0);
+        assert!(Rc::ptr_eq(&outer_allocation.0, &first_drops));
+        with_element_arena(|current| assert!(std::ptr::eq(current, first_arena.as_ptr())));
+        let restored_allocation = allocate_probe(&first_drops);
+        assert!(Rc::ptr_eq(&restored_allocation.0, &first_drops));
+        exit_and_clear(outer, &first_arena);
+        assert_eq!(first_drops.get(), 2);
+        assert!(!draw_in_progress());
+    }
+
+    #[test]
+    fn test_element_arena_context_panic_restores_parent_and_scope_depth() {
+        let _restore = RestoreContext::install(foreign_context());
+        let arena = RefCell::new(Arena::new(1024));
+        let drops = Rc::new(Cell::new(0));
+        let outer = ElementArenaScope::enter(&arena);
+        let allocation = allocate_probe(&drops);
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _inner = ElementArenaScope::enter(&arena);
+            let _allocation = allocate_probe(&drops);
+            panic!("unwind a nested draw");
+        }));
+        assert!(result.is_err());
+        assert!(draw_in_progress());
+        arena.borrow_mut().clear();
+        assert_eq!(drops.get(), 0);
+        assert!(Rc::ptr_eq(&allocation.0, &drops));
+        exit_and_clear(outer, &arena);
+        assert_eq!(drops.get(), 2);
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _scope = ElementArenaScope::enter(&arena);
+            let _allocation = allocate_probe(&drops);
+            panic!("unwind an outer draw");
+        }));
+        assert!(result.is_err());
+        assert!(!draw_in_progress());
+        arena.borrow_mut().clear();
+        assert_eq!(drops.get(), 3);
+    }
+
+    #[gpui::test]
+    fn test_element_arena_context_multiple_apps(
+        first: &mut TestAppContext,
+        second: &mut TestAppContext,
+    ) {
+        let _restore = RestoreContext::install(foreign_context());
+        let first_drops = Rc::new(Cell::new(0));
+        let second_drops = Rc::new(Cell::new(0));
+        first.update(|first| {
+            let outer = ElementArenaScope::enter(&first.element_arena);
+            let allocation = allocate_probe(&first_drops);
+            second.update(|second| {
+                let inner = ElementArenaScope::enter(&second.element_arena);
+                let allocation = allocate_probe(&second_drops);
+                assert!(Rc::ptr_eq(&allocation.0, &second_drops));
+                inner.exit(&second.element_arena).clear(second);
+            });
+            assert_eq!(second_drops.get(), 1);
+            assert_eq!(first_drops.get(), 0);
+            assert!(Rc::ptr_eq(&allocation.0, &first_drops));
+            with_element_arena(|current| {
+                assert!(std::ptr::eq(current, first.element_arena.as_ptr()));
+            });
+            outer.exit(&first.element_arena).clear(first);
+        });
+        assert_eq!(first_drops.get(), 1);
+        assert!(!draw_in_progress());
+    }
+
+    #[gpui::test]
+    fn test_element_arena_context_many_frames_have_bounded_capacity(cx: &mut App) {
+        let _restore = RestoreContext::install(foreign_context());
+        let drops = Rc::new(Cell::new(0));
+        let initial_capacity = cx.element_arena.borrow().capacity();
+        let fallback_capacity = FOREIGN_FALLBACK.with_borrow(Arena::capacity);
+        for frame in 0..256 {
+            let scope = ElementArenaScope::enter(&cx.element_arena);
+            for _ in 0..128 {
+                let allocation = allocate_probe(&drops);
+                assert!(Rc::ptr_eq(&allocation.0, &drops));
+            }
+            assert_eq!(drops.get(), frame * 128);
+            scope.exit(&cx.element_arena).clear(cx);
+            assert_eq!(drops.get(), (frame + 1) * 128);
+            assert_eq!(cx.element_arena.borrow().capacity(), initial_capacity);
+            assert_eq!(
+                FOREIGN_FALLBACK.with_borrow(Arena::capacity),
+                fallback_capacity
+            );
+            assert!(!draw_in_progress());
+        }
+    }
+
+    #[test]
+    fn test_element_arena_context_installation_and_arenas_are_thread_local() {
+        let _restore = RestoreContext::install(foreign_context());
+        let context = ElementArenaContext::current();
+        let arena = RefCell::new(Arena::new(1024));
+        let scope = ElementArenaScope::enter(&arena);
+        let parent_fallback = FOREIGN_FALLBACK.with(|arena| arena as *const _ as usize);
+        let child = std::thread::spawn(move || {
+            assert!(INSTALLED_ELEMENT_ARENA_CONTEXT.with(Cell::get).is_none());
+            assert!(!draw_in_progress());
+            let _restore = RestoreContext::install(context);
+            assert!(!draw_in_progress());
+            assert_ne!(
+                FOREIGN_FALLBACK.with(|arena| arena as *const _ as usize),
+                parent_fallback
+            );
+            let child_arena = RefCell::new(Arena::new(1024));
+            let child_scope = ElementArenaScope::enter(&child_arena);
+            let drops = Rc::new(Cell::new(0));
+            let allocation = allocate_probe(&drops);
+            assert!(Rc::ptr_eq(&allocation.0, &drops));
+            exit_and_clear(child_scope, &child_arena);
+            assert_eq!(drops.get(), 1);
+            assert!(!draw_in_progress());
+        });
+        if let Err(panic) = child.join() {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(draw_in_progress());
+        with_element_arena(|current| assert!(std::ptr::eq(current, arena.as_ptr())));
+        exit_and_clear(scope, &arena);
+        assert!(!draw_in_progress());
     }
 }
 
