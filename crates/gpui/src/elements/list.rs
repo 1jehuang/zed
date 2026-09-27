@@ -1540,14 +1540,17 @@ impl Element for List {
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
 
-        // If the width of the list has changed, invalidate all cached item heights
+        // If the width of the list has changed, invalidate all cached item heights.
+        // Keep each previous height as a hint so off-screen rows still contribute
+        // a realistic extent. Dropping them to 0px makes the scrollbar thumb jump
+        // after a resize and then shrink row by row as scrolling remeasures them.
         if state
             .last_layout_bounds
             .is_none_or(|last_bounds| last_bounds.size.width != bounds.size.width)
         {
             let new_items = SumTree::from_iter(
                 state.items.iter().map(|item| ListItem::Unmeasured {
-                    size_hint: None,
+                    size_hint: item.size_hint(),
                     focus_handle: item.focus_handle(),
                 }),
                 (),
@@ -2096,6 +2099,49 @@ mod test {
             view.into_any_element()
         });
         assert_eq!(state.max_offset_for_scrollbar().y, px(300.));
+    }
+
+    #[gpui::test]
+    fn test_lazy_list_keeps_height_hints_after_width_change(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+
+        // Lazily measured, like a chat transcript: only visible rows render.
+        let state = ListState::new(20, crate::ListAlignment::Top, px(0.));
+
+        struct TestView(ListState);
+        impl Render for TestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                list(self.0.clone(), |_, _, _| {
+                    div().h(px(50.)).w_full().into_any()
+                })
+                .w_full()
+                .h_full()
+            }
+        }
+
+        let view = cx.update(|_, cx| cx.new(|_| TestView(state.clone())));
+        // Scroll through every row once so each has a real measurement.
+        for item_ix in 0..20 {
+            state.scroll_to(super::ListOffset {
+                item_ix,
+                offset_in_item: px(0.),
+            });
+            cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, _| {
+                view.clone().into_any_element()
+            });
+        }
+        state.scroll_to(super::ListOffset::default());
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, _| {
+            view.clone().into_any_element()
+        });
+        assert_eq!(state.max_offset_for_scrollbar().y, px(800.));
+
+        // Resizing invalidates heights, but off-screen rows must keep their
+        // previous heights as estimates instead of collapsing to 0px.
+        cx.draw(point(px(0.), px(0.)), size(px(150.), px(200.)), |_, _| {
+            view.into_any_element()
+        });
+        assert_eq!(state.max_offset_for_scrollbar().y, px(800.));
     }
 
     #[gpui::test]
